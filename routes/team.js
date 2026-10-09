@@ -14,14 +14,28 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 router.use(authenticateToken);
 
 // Middleware para verificar permisos de equipo
+// Admin de la organización activa: dueño, rol admin en su membresía o super-admin.
+// El rol del usuario (User.role) se mantiene por compatibilidad con cuentas viejas.
+const isTeamAdmin = (req) => !!(
+  req.isSuperAdminSession ||
+  req.membership?.isOwner ||
+  req.membership?.role === 'admin' ||
+  req.user?.role === 'admin'
+);
+
 const checkTeamPermissions = (action) => {
   return (req, res, next) => {
     const user = req.user;
     console.log('🔐 Checking team permissions for:', user.email);
-    
+
     // Admin always has full access
-    if (user.role === 'admin') {
+    if (isTeamAdmin(req)) {
       console.log('👑 Admin access granted');
+      return next();
+    }
+
+    // Permiso de equipo en la membresía de la organización
+    if (req.membership?.permissions?.team?.[action]) {
       return next();
     }
     
@@ -270,36 +284,62 @@ router.put('/orgchart', authenticateToken, requireRole('admin'), async (req, res
 router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = req.body;
-    
-    // No permitir cambiar la contraseña a través de esta ruta
-    delete updateData.password;
+
+    // Solo los campos del formulario de Equipo. Nunca contraseña (tiene su ruta),
+    // ni isSuperAdmin, isActive, 2FA u otros campos sensibles del usuario.
+    const EDITABLE_FIELDS = ['name', 'email', 'phone', 'position', 'department', 'departmentRole', 'supervisor', 'role', 'permissions'];
+    const updateData = {};
+    for (const field of EDITABLE_FIELDS) {
+      if (req.body?.[field] !== undefined) updateData[field] = req.body[field];
+    }
 
     // Sanitizar supervisor (convertir string vacío a null para evitar errores de Mongoose)
     if (updateData.supervisor === '') {
       updateData.supervisor = null;
     }
-    
-    // Solo admin puede cambiar roles de admin
-    if (updateData.role === 'admin' && req.user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Solo los administradores pueden asignar el rol de administrador' 
+
+    // Solo un administrador de la organización asigna o quita el rol de administrador
+    // y cambia permisos. Antes se miraba User.role, que no es el rol en la organización:
+    // un dueño/admin con otro rol global no podía nombrar administradores.
+    const touchesAdmin = updateData.role === 'admin' || updateData.permissions !== undefined;
+    if (touchesAdmin && !isTeamAdmin(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los administradores pueden asignar el rol de administrador'
       });
     }
 
     // No permitir que un usuario se modifique a sí mismo para evitar auto-bloqueo
     if (id === req.user._id.toString()) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No puedes modificar tu propio usuario' 
+      return res.status(400).json({
+        success: false,
+        message: 'No puedes modificar tu propio usuario'
+      });
+    }
+
+    // Solo miembros de esta organización
+    const targetMembership = await Membership.findOne({ user: id, organization: req.organizationId });
+    if (!targetMembership) {
+      return res.status(404).json({
+        success: false,
+        message: 'Miembro del equipo no encontrado'
+      });
+    }
+
+    // Quitarle el rol de administrador al dueño de la organización lo dejaría sin control
+    if (updateData.role && updateData.role !== 'admin' && targetMembership.isOwner) {
+      return res.status(400).json({
+        success: false,
+        message: 'El dueño de la organización debe seguir siendo administrador'
       });
     }
 
     if (updateData.role && !updateData.permissions) {
       const foundRole = await Role.findOne({ name: updateData.role });
-      if (foundRole) {
-        updateData.permissions = foundRole.permissions;
+      if (foundRole?.permissions) {
+        updateData.permissions = typeof foundRole.permissions.toObject === 'function'
+          ? foundRole.permissions.toObject()
+          : foundRole.permissions;
       }
     }
 
@@ -325,6 +365,14 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
       if (updateData[field] !== undefined) membershipUpdate[field] = updateData[field] === '' ? null : updateData[field];
     }
     if (membershipUpdate.departmentRole === null) membershipUpdate.departmentRole = 'member';
+    // El rol que cuenta en la organización (permisos, menú, Autorizaciones) es el de
+    // la membresía; antes solo se guardaba en el usuario y el cambio no se veía.
+    if (updateData.role) {
+      membershipUpdate.role = updateData.role;
+      if (updateData.permissions && typeof updateData.permissions === 'object') {
+        membershipUpdate.permissions = updateData.permissions;
+      }
+    }
     if (Object.keys(membershipUpdate).length > 0 && req.organizationId) {
       await Membership.updateOne(
         { user: member._id, organization: req.organizationId },
