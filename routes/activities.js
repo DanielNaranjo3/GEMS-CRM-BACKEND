@@ -8,6 +8,13 @@ const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
 const { notifyMentions, notifyAssignment, notifyComment } = require('../services/notificationHelpers');
 const { HISTORY_POPULATE, commentSnippet, applyTrackedUpdates } = require('../services/historyService');
+const {
+  TaskApprovalError,
+  guardDueDateUpdate,
+  createApprovalRequest,
+  deleteOrRequest,
+  describeRequest
+} = require('../services/taskApprovalService');
 
 // Campos que no se registran como cambio en el historial: internos o con registro propio.
 const UNTRACKED_FIELDS = new Set([
@@ -225,7 +232,13 @@ router.put('/:id', async (req, res) => {
 
     const previousDueDate = activity.dueDate ? activity.dueDate.getTime() : null;
 
-    const updates = normalizeActivityBody(req.body);
+    // Ampliar el plazo requiere aprobación del líder del área (ver dueDateExtensionService):
+    // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
+    const { updates, pendingExtension } = await guardDueDateUpdate({
+      req,
+      entity: activity,
+      updates: normalizeActivityBody(req.body)
+    });
     // Un cambio de tipo a feature también suelta la feature padre que tuviera
     if ((updates.type ?? activity.type) === 'feature') updates.featureId = null;
 
@@ -245,10 +258,19 @@ router.put('/:id', async (req, res) => {
     // Como el findByIdAndUpdate anterior: no revalidar campos que no se tocaron
     await activity.save({ validateModifiedOnly: true });
 
+    let dueDateExtensionRequest = null;
+    if (pendingExtension) {
+      const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'activity', entity: activity, ...pendingExtension });
+      dueDateExtensionRequest = await describeRequest(request);
+    }
+
     const populated = await populateActivityDetail(Activity.findById(activity._id));
 
-    res.json(populated);
+    res.json(dueDateExtensionRequest ? { ...populated.toJSON(), dueDateExtensionRequest } : populated);
   } catch (error) {
+    if (error instanceof TaskApprovalError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
     res.status(400).json({ error: error.message });
   }
 });
@@ -396,21 +418,27 @@ router.post('/:id/timer', async (req, res) => {
 });
 
 // Eliminar actividad
+// Solo el líder del área o un administrador elimina directamente; cualquier otra
+// persona genera una solicitud de autorización (202) que aprueba su líder.
 router.delete('/:id', async (req, res) => {
   try {
-    const activity = await Activity.findOneAndDelete({ _id: req.params.id, organizationId: req.organizationId });
-    if (!activity) {
+    const result = await deleteOrRequest({
+      req,
+      entityType: 'activity',
+      entityId: req.params.id,
+      reason: req.body?.reason || req.query.reason
+    });
+    if (!result) {
       return res.status(404).json({ error: 'Actividad no encontrada' });
     }
-    // Al borrar una feature, sus tareas no se borran: quedan "Sin feature"
-    if (activity.type === 'feature') {
-      await Activity.updateMany(
-        { featureId: activity._id, organizationId: req.organizationId },
-        { $set: { featureId: null } }
-      );
+    if (!result.deleted) {
+      return res.status(202).json({ success: false, pendingApproval: true, approvalRequest: result.request });
     }
     res.json({ success: true });
   } catch (error) {
+    if (error instanceof TaskApprovalError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: error.message });
   }
 });

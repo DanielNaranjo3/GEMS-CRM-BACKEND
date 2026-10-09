@@ -165,6 +165,7 @@ const prospectsRoutes = require('./routes/prospects');
 const avatarRoutes = require('./routes/avatars');
 const taskReportsRoutes = require('./routes/taskReports');
 const tasksRoutes = require('./routes/tasks');
+const taskApprovalsRoutes = require('./routes/taskApprovals');
 const boardsRoutes = require('./routes/boards');
 const githubRoutes = require('./routes/github');
 const ticketsRoutes = require('./routes/tickets');
@@ -218,6 +219,7 @@ app.use('/api/avatars', avatarRoutes);
 app.use('/api/task-reports', taskReportsRoutes);
 app.use('/api/taskReports', taskReportsRoutes); // Alias para compatibilidad
 app.use('/api/tasks', tasksRoutes);
+app.use('/api/task-approvals', taskApprovalsRoutes);
 app.use('/api/boards', boardsRoutes);
 app.use('/api/github', githubRoutes);
 app.use('/api/tickets', ticketsRoutes);

@@ -312,12 +312,29 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
     if (!member) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Miembro del equipo no encontrado' 
+        message: 'Miembro del equipo no encontrado'
       });
     }
-    
-    res.json({ 
-      success: true, 
+
+    // El listado lee área, rol de líder, cargo y supervisor del Membership de la
+    // organización; sin esto los cambios hechos aquí no se veían (y el líder de
+    // área no podía aprobar ampliaciones de plazo ni eliminaciones).
+    const membershipFields = ['department', 'departmentRole', 'position', 'supervisor'];
+    const membershipUpdate = {};
+    for (const field of membershipFields) {
+      if (updateData[field] !== undefined) membershipUpdate[field] = updateData[field] === '' ? null : updateData[field];
+    }
+    if (membershipUpdate.departmentRole === null) membershipUpdate.departmentRole = 'member';
+    if (Object.keys(membershipUpdate).length > 0 && req.organizationId) {
+      await Membership.updateOne(
+        { user: member._id, organization: req.organizationId },
+        { $set: membershipUpdate },
+        { runValidators: true }
+      );
+    }
+
+    res.json({
+      success: true,
       message: 'Miembro del equipo actualizado exitosamente',
       data: member
     });

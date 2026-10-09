@@ -9,6 +9,13 @@ const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
 const { notifyMentions, notifyAssignment, notifyComment } = require('../services/notificationHelpers');
 const { HISTORY_POPULATE, commentSnippet, applyTrackedUpdates } = require('../services/historyService');
+const {
+  TaskApprovalError,
+  guardDueDateUpdate,
+  createApprovalRequest,
+  deleteOrRequest,
+  describeRequest
+} = require('../services/taskApprovalService');
 
 // Configuración de multer para imágenes de comentarios en tareas
 const taskCommentsUploadDir = path.join(__dirname, '..', 'uploads', 'task-comments');
@@ -244,17 +251,31 @@ router.put('/:id', async (req, res) => {
     if (!task) {
       return res.status(404).json({ error: 'Tarea no encontrada' });
     }
-    
-    await applyTrackedUpdates(task, req.body, userId, {
+
+    // Ampliar el plazo requiere aprobación del líder del área (ver dueDateExtensionService):
+    // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
+    const { updates, pendingExtension } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
+
+    await applyTrackedUpdates(task, updates, userId, {
       untracked: UNTRACKED_FIELDS,
       valueless: VALUELESS_FIELDS
     });
 
     await task.save();
+
+    let dueDateExtensionRequest = null;
+    if (pendingExtension) {
+      const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'task', entity: task, ...pendingExtension });
+      dueDateExtensionRequest = await describeRequest(request);
+    }
+
     await populateTaskDetail(task);
 
-    res.json(task);
+    res.json(dueDateExtensionRequest ? { ...task.toJSON(), dueDateExtensionRequest } : task);
   } catch (error) {
+    if (error instanceof TaskApprovalError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
     res.status(400).json({ error: error.message });
   }
 });
@@ -545,16 +566,33 @@ router.post('/:id/timer/stop', async (req, res) => {
 });
 
 // Eliminar tarea
+// Solo el líder del área o un administrador elimina directamente; cualquier otra
+// persona genera una solicitud de autorización (202) que aprueba su líder.
 router.delete('/:id', async (req, res) => {
   try {
-    const task = await Task.findOneAndDelete({ _id: req.params.id, organizationId: req.organizationId });
-    
-    if (!task) {
+    const result = await deleteOrRequest({
+      req,
+      entityType: 'task',
+      entityId: req.params.id,
+      reason: req.body?.reason || req.query.reason
+    });
+
+    if (!result) {
       return res.status(404).json({ error: 'Tarea no encontrada' });
     }
-    
+    if (!result.deleted) {
+      return res.status(202).json({
+        message: 'Se envió la solicitud de autorización para eliminar la tarea',
+        pendingApproval: true,
+        approvalRequest: result.request
+      });
+    }
+
     res.json({ message: 'Tarea eliminada exitosamente' });
   } catch (error) {
+    if (error instanceof TaskApprovalError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: error.message });
   }
 });

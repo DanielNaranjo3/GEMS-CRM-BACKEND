@@ -8,7 +8,7 @@ const NotificationSchema = new mongoose.Schema({
   // Categoría de notificación
   category: {
     type: String,
-    enum: ['mention', 'assignment', 'comment', 'due-soon', 'overdue', 'info'],
+    enum: ['mention', 'assignment', 'comment', 'due-soon', 'overdue', 'info', 'approval'],
     index: true
   },
 
