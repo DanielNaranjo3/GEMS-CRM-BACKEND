@@ -7,6 +7,7 @@ const {
   TaskApprovalError,
   classifyDueDateChange,
   isOrgAdmin,
+  isReviewer,
   canManageDirectly,
   resolveApprovers,
   createApprovalRequest,
@@ -67,15 +68,26 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Cantidad de solicitudes pendientes por aprobar (para el badge del menú)
+// Resumen para la página y el menú:
+// - count: pendientes que me toca aprobar
+// - mine: mis solicitudes que siguen en espera
+// - canReview: si soy líder de área o administrador (si no, no tengo bandeja de aprobación)
 router.get('/pending-count', async (req, res) => {
   try {
-    const count = await TaskApprovalRequest.countDocuments({
-      organizationId: req.organizationId,
-      status: 'pending',
-      ...boxFilter(req, 'inbox')
-    });
-    res.json({ count });
+    const [count, mine, reviewer] = await Promise.all([
+      TaskApprovalRequest.countDocuments({
+        organizationId: req.organizationId,
+        status: 'pending',
+        ...boxFilter(req, 'inbox')
+      }),
+      TaskApprovalRequest.countDocuments({
+        organizationId: req.organizationId,
+        status: 'pending',
+        requestedBy: req.user._id
+      }),
+      isReviewer(req)
+    ]);
+    res.json({ count, mine, canReview: reviewer || count > 0 });
   } catch (error) {
     handleError(res, error);
   }

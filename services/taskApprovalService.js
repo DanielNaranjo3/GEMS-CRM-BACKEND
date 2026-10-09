@@ -117,6 +117,14 @@ function assigneeIds(entity) {
   return list.map(idOf).filter(Boolean);
 }
 
+/** ¿Es administrador o líder de un área? (puede recibir solicitudes para aprobar) */
+async function isReviewer(req) {
+  if (isOrgAdmin(req)) return true;
+  const userId = idOf(req.user?._id);
+  const me = (await getProfiles(req.organizationId, [userId])).get(userId);
+  return !!(me && me.isLeader && normalizeDepartment(me.department));
+}
+
 /**
  * ¿Puede quien hace la petición ampliar el plazo o eliminar esta entidad sin
  * pedir autorización? Sí si es administrador, o si es líder de un área y la
@@ -427,6 +435,7 @@ module.exports = {
   TaskApprovalError,
   classifyDueDateChange,
   isOrgAdmin,
+  isReviewer,
   canManageDirectly,
   resolveApprovers,
   guardDueDateUpdate,
