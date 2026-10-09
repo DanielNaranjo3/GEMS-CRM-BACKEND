@@ -13,6 +13,7 @@ const {
   TaskApprovalError,
   guardDueDateUpdate,
   createApprovalRequest,
+  recordAutoApproval,
   deleteOrRequest,
   describeRequest
 } = require('../services/taskApprovalService');
@@ -254,7 +255,8 @@ router.put('/:id', async (req, res) => {
 
     // Ampliar el plazo requiere aprobación del líder del área (ver dueDateExtensionService):
     // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
-    const { updates, pendingExtension } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
+    // Con autoaprobación se aplica y queda la traza.
+    const { updates, pendingExtension, autoApproval } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
 
     await applyTrackedUpdates(task, updates, userId, {
       untracked: UNTRACKED_FIELDS,
@@ -268,10 +270,15 @@ router.put('/:id', async (req, res) => {
       const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'task', entity: task, ...pendingExtension });
       dueDateExtensionRequest = await describeRequest(request);
     }
+    if (autoApproval) {
+      await recordAutoApproval({ req, kind: 'due-date-extension', entityType: 'task', entity: task, ...autoApproval });
+    }
 
     await populateTaskDetail(task);
 
-    res.json(dueDateExtensionRequest ? { ...task.toJSON(), dueDateExtensionRequest } : task);
+    if (dueDateExtensionRequest) return res.json({ ...task.toJSON(), dueDateExtensionRequest });
+    if (autoApproval) return res.json({ ...task.toJSON(), dueDateAutoApproved: true });
+    res.json(task);
   } catch (error) {
     if (error instanceof TaskApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
@@ -588,7 +595,7 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    res.json({ message: 'Tarea eliminada exitosamente' });
+    res.json({ message: 'Tarea eliminada exitosamente', autoApproved: !!result.autoApproved });
   } catch (error) {
     if (error instanceof TaskApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });

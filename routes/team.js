@@ -86,6 +86,7 @@ router.get('/', checkTeamPermissions('view'), async (req, res) => {
         photo: m.user.photo,
         department: m.department || m.user.department,
         departmentRole: m.departmentRole || m.user.departmentRole,
+        selfApproval: m.selfApproval === true,
         supervisor: m.supervisor || m.user.supervisor,
         position: m.position || m.user.position,
         phone: m.user.phone,
@@ -124,8 +125,8 @@ router.post('/', checkTeamPermissions('create'), async (req, res) => {
       });
     }
 
-    // Solo admin puede crear otros admins
-    if (role === 'admin' && req.user.role !== 'admin') {
+    // Solo un administrador de la organización crea administradores o da autoaprobación
+    if ((role === 'admin' || req.body.selfApproval === true) && !isTeamAdmin(req)) {
       return res.status(403).json({ 
         success: false, 
         message: 'Solo los administradores pueden crear otros administradores' 
@@ -170,6 +171,7 @@ router.post('/', checkTeamPermissions('create'), async (req, res) => {
       position,
       supervisor: (supervisor && supervisor !== '') ? supervisor : null,
       ...(permissions && { permissions }),
+      selfApproval: req.body.selfApproval === true,
       invitedBy: req.user._id,
       acceptedAt: new Date()
     });
@@ -326,6 +328,17 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
       });
     }
 
+    // Permiso de autoaprobación (vive en la membresía): solo un administrador lo cambia.
+    // El formulario lo manda siempre, así que solo se valida si cambia de valor.
+    const wantsSelfApproval = typeof req.body?.selfApproval === 'boolean' ? req.body.selfApproval : undefined;
+    const selfApprovalChanged = wantsSelfApproval !== undefined && wantsSelfApproval !== (targetMembership.selfApproval === true);
+    if (selfApprovalChanged && !isTeamAdmin(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los administradores pueden dar o quitar la autoaprobación'
+      });
+    }
+
     // Quitarle el rol de administrador al dueño de la organización lo dejaría sin control
     if (updateData.role && updateData.role !== 'admin' && targetMembership.isOwner) {
       return res.status(400).json({
@@ -365,6 +378,7 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
       if (updateData[field] !== undefined) membershipUpdate[field] = updateData[field] === '' ? null : updateData[field];
     }
     if (membershipUpdate.departmentRole === null) membershipUpdate.departmentRole = 'member';
+    if (selfApprovalChanged) membershipUpdate.selfApproval = wantsSelfApproval;
     // El rol que cuenta en la organización (permisos, menú, Autorizaciones) es el de
     // la membresía; antes solo se guardaba en el usuario y el cambio no se veía.
     if (updateData.role) {
@@ -381,10 +395,23 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
       );
     }
 
+    // Misma forma que el listado: datos del usuario con lo que vive en la membresía
+    const freshMembership = await Membership.findOne({ user: member._id, organization: req.organizationId }).lean();
+    const memberData = member.toJSON();
     res.json({
       success: true,
       message: 'Miembro del equipo actualizado exitosamente',
-      data: member
+      data: {
+        ...memberData,
+        membershipId: freshMembership?._id,
+        role: freshMembership?.role || memberData.role,
+        department: freshMembership?.department || memberData.department,
+        departmentRole: freshMembership?.departmentRole || memberData.departmentRole,
+        position: freshMembership?.position || memberData.position,
+        supervisor: freshMembership?.supervisor || memberData.supervisor,
+        isOwner: !!freshMembership?.isOwner,
+        selfApproval: freshMembership?.selfApproval === true
+      }
     });
   } catch (error) {
     res.status(400).json({ 

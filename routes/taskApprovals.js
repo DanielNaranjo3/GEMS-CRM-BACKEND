@@ -8,7 +8,8 @@ const {
   classifyDueDateChange,
   isOrgAdmin,
   isReviewer,
-  canManageDirectly,
+  getDirectAccess,
+  recordAutoApproval,
   resolveApprovers,
   createApprovalRequest,
   describeRequest,
@@ -99,13 +100,14 @@ router.get('/entity/:entityType/:entityId', async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
     const entity = await loadEntity(entityType, entityId, req.organizationId);
-    const [direct, pending] = await Promise.all([
-      canManageDirectly(req, entity),
+    const [access, pending] = await Promise.all([
+      getDirectAccess(req, entity),
       populateRequest(TaskApprovalRequest.find({
         organizationId: req.organizationId, entityType, entityId: entity._id, status: 'pending'
       }).sort({ createdAt: -1 }))
     ]);
 
+    const direct = !!access;
     let approverIds = [];
     let approverSource = null;
     if (!direct) {
@@ -116,6 +118,8 @@ router.get('/entity/:entityType/:entityId', async (req, res) => {
 
     res.json({
       canManageDirectly: direct,
+      // 'admin' | 'leader' | 'self-approval' | null (debe pedir autorización)
+      directAccess: access,
       approverSource,
       approverIds,
       pendingExtension: pending.find(r => r.kind === 'due-date-extension') || null,
@@ -143,9 +147,22 @@ router.post('/due-date-extension', async (req, res) => {
       });
     }
 
-    if (change === 'set' || await canManageDirectly(req, entity)) {
+    const access = change === 'set' ? 'set' : await getDirectAccess(req, entity);
+    if (access) {
+      const previousDueDate = entity.dueDate || null;
       await applyDueDate(entityType, entity, requestedDueDate, req.user._id);
-      return res.json({ applied: true, dueDate: entity.dueDate, status: entity.status });
+      if (access === 'self-approval') {
+        await recordAutoApproval({
+          req, kind: 'due-date-extension', entityType, entity,
+          currentDueDate: previousDueDate, requestedDueDate, reason
+        });
+      }
+      return res.json({
+        applied: true,
+        autoApproved: access === 'self-approval',
+        dueDate: entity.dueDate,
+        status: entity.status
+      });
     }
 
     const request = await createApprovalRequest({

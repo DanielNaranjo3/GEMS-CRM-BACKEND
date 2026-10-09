@@ -12,6 +12,7 @@ const {
   TaskApprovalError,
   guardDueDateUpdate,
   createApprovalRequest,
+  recordAutoApproval,
   deleteOrRequest,
   describeRequest
 } = require('../services/taskApprovalService');
@@ -232,9 +233,10 @@ router.put('/:id', async (req, res) => {
 
     const previousDueDate = activity.dueDate ? activity.dueDate.getTime() : null;
 
-    // Ampliar el plazo requiere aprobación del líder del área (ver dueDateExtensionService):
+    // Ampliar el plazo requiere aprobación del líder del área (ver taskApprovalService):
     // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
-    const { updates, pendingExtension } = await guardDueDateUpdate({
+    // Con autoaprobación se aplica y queda la traza.
+    const { updates, pendingExtension, autoApproval } = await guardDueDateUpdate({
       req,
       entity: activity,
       updates: normalizeActivityBody(req.body)
@@ -263,10 +265,15 @@ router.put('/:id', async (req, res) => {
       const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'activity', entity: activity, ...pendingExtension });
       dueDateExtensionRequest = await describeRequest(request);
     }
+    if (autoApproval) {
+      await recordAutoApproval({ req, kind: 'due-date-extension', entityType: 'activity', entity: activity, ...autoApproval });
+    }
 
     const populated = await populateActivityDetail(Activity.findById(activity._id));
 
-    res.json(dueDateExtensionRequest ? { ...populated.toJSON(), dueDateExtensionRequest } : populated);
+    if (dueDateExtensionRequest) return res.json({ ...populated.toJSON(), dueDateExtensionRequest });
+    if (autoApproval) return res.json({ ...populated.toJSON(), dueDateAutoApproved: true });
+    res.json(populated);
   } catch (error) {
     if (error instanceof TaskApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
@@ -434,7 +441,7 @@ router.delete('/:id', async (req, res) => {
     if (!result.deleted) {
       return res.status(202).json({ success: false, pendingApproval: true, approvalRequest: result.request });
     }
-    res.json({ success: true });
+    res.json({ success: true, autoApproved: !!result.autoApproved });
   } catch (error) {
     if (error instanceof TaskApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });

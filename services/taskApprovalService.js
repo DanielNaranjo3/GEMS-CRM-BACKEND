@@ -78,7 +78,8 @@ function buildProfile(membership, user) {
     department: (membership?.department || user.department || null),
     isLeader: membership?.departmentRole === 'leader' || user.departmentRole === 'leader',
     supervisor: idOf(membership?.supervisor || user.supervisor),
-    isAdmin: !!(membership && (membership.isOwner || membership.role === 'admin'))
+    isAdmin: !!(membership && (membership.isOwner || membership.role === 'admin')),
+    selfApproval: membership?.selfApproval === true
   };
 }
 
@@ -127,20 +128,72 @@ async function isReviewer(req) {
 
 /**
  * ¿Puede quien hace la petición ampliar el plazo o eliminar esta entidad sin
- * pedir autorización? Sí si es administrador, o si es líder de un área y la
- * tarea es de esa área (algún asignado pertenece a ella, él mismo está asignado
- * o no hay asignados).
+ * pedir autorización, y por qué?
+ * - 'admin': administrador de la organización.
+ * - 'leader': líder de un área y la tarea es de esa área (algún asignado
+ *   pertenece a ella, él mismo está asignado o no hay asignados).
+ * - 'self-approval': tiene el permiso especial de autoaprobación; no pide
+ *   permiso pero la acción queda registrada como solicitud autoaprobada.
+ * - null: debe pedir autorización.
  */
-async function canManageDirectly(req, entity) {
-  if (isOrgAdmin(req)) return true;
+async function getDirectAccess(req, entity) {
+  if (isOrgAdmin(req)) return 'admin';
   const userId = idOf(req.user?._id);
   const assignees = assigneeIds(entity);
   const profiles = await getProfiles(req.organizationId, [userId, ...assignees]);
   const me = profiles.get(userId);
-  if (!me || !me.isLeader || !normalizeDepartment(me.department)) return false;
-  if (assignees.length === 0 || assignees.includes(userId)) return true;
+  if (!me) return null;
+
   const myDepartment = normalizeDepartment(me.department);
-  return assignees.some(id => normalizeDepartment(profiles.get(id)?.department) === myDepartment);
+  if (me.isLeader && myDepartment) {
+    const ownsTask = assignees.length === 0 || assignees.includes(userId) ||
+      assignees.some(id => normalizeDepartment(profiles.get(id)?.department) === myDepartment);
+    if (ownsTask) return 'leader';
+  }
+  if (me.selfApproval) return 'self-approval';
+  return null;
+}
+
+async function canManageDirectly(req, entity) {
+  return !!(await getDirectAccess(req, entity));
+}
+
+/**
+ * Deja la traza de una acción hecha con autoaprobación: una solicitud que nace
+ * aprobada por la misma persona. Los aprobadores que le habrían tocado quedan
+ * registrados para que la vean en su historial; no se les notifica.
+ */
+async function recordAutoApproval({ req, kind, entityType, entity, currentDueDate = null, requestedDueDate = null, reason = '' }) {
+  const requesterId = idOf(req.user._id);
+  let department = null;
+  let approvers = [];
+  try {
+    const resolved = await resolveApprovers(req.organizationId, requesterId);
+    department = resolved.department;
+    approvers = resolved.approvers;
+  } catch (e) {
+    console.warn('recordAutoApproval: no se pudieron resolver aprobadores:', e.message);
+  }
+
+  return TaskApprovalRequest.create({
+    organizationId: req.organizationId,
+    kind,
+    entityType,
+    entityId: entity._id,
+    entityTitle: entity.title || '',
+    requestedBy: requesterId,
+    department,
+    currentDueDate: kind === 'due-date-extension' ? (currentDueDate || null) : null,
+    requestedDueDate: kind === 'due-date-extension' ? new Date(requestedDueDate) : null,
+    reason: (reason || '').toString().trim().slice(0, 1000),
+    approvers,
+    approverSource: 'self-approval',
+    autoApproved: true,
+    status: 'approved',
+    reviewedBy: requesterId,
+    reviewedAt: new Date(),
+    reviewComment: 'Autoaprobada con permiso especial'
+  });
 }
 
 /**
@@ -272,10 +325,20 @@ async function guardDueDateUpdate({ req, entity, updates }) {
     throw new TaskApprovalError(400, 'INVALID_DUE_DATE', 'La fecha de entrega no es válida');
   }
   if (change !== 'extend' && change !== 'remove') {
-    return { updates: clean, pendingExtension: null };
+    return { updates: clean, pendingExtension: null, autoApproval: null };
   }
-  if (await canManageDirectly(req, entity)) {
-    return { updates: clean, pendingExtension: null };
+  const access = await getDirectAccess(req, entity);
+  if (access === 'admin' || access === 'leader') {
+    return { updates: clean, pendingExtension: null, autoApproval: null };
+  }
+  // Autoaprobación: amplía sin pedir permiso y deja la traza (quitar la fecha
+  // sigue siendo solo de líderes y administradores).
+  if (access === 'self-approval' && change === 'extend') {
+    return {
+      updates: clean,
+      pendingExtension: null,
+      autoApproval: { currentDueDate: entity.dueDate || null, requestedDueDate: clean.dueDate, reason }
+    };
   }
   if (change === 'remove') {
     throw new TaskApprovalError(403, 'DUE_DATE_REMOVAL_FORBIDDEN',
@@ -284,7 +347,7 @@ async function guardDueDateUpdate({ req, entity, updates }) {
 
   const requestedDueDate = clean.dueDate;
   delete clean.dueDate;
-  return { updates: clean, pendingExtension: { requestedDueDate, reason } };
+  return { updates: clean, pendingExtension: { requestedDueDate, reason }, autoApproval: null };
 }
 
 /** Resumen que se adjunta a la respuesta para que el frontend avise. */
@@ -295,6 +358,7 @@ async function describeRequest(request) {
   return {
     _id: populated._id,
     kind: populated.kind,
+    autoApproved: !!populated.autoApproved,
     status: populated.status,
     currentDueDate: populated.currentDueDate,
     requestedDueDate: populated.requestedDueDate,
@@ -370,9 +434,14 @@ async function deleteOrRequest({ req, entityType, entityId, reason }) {
   const entity = await Model.findOne({ _id: entityId, organizationId: req.organizationId });
   if (!entity) return null;
 
-  if (await canManageDirectly(req, entity)) {
+  const access = await getDirectAccess(req, entity);
+  if (access) {
+    // Con autoaprobación queda la traza antes de borrar (después ya no hay título)
+    const trace = access === 'self-approval'
+      ? await recordAutoApproval({ req, kind: 'deletion', entityType, entity, reason })
+      : null;
     await deleteEntity(entityType, entity._id, req.organizationId);
-    return { deleted: true };
+    return { deleted: true, autoApproved: !!trace };
   }
 
   const request = await createApprovalRequest({ req, kind: 'deletion', entityType, entity, reason });
@@ -436,7 +505,9 @@ module.exports = {
   classifyDueDateChange,
   isOrgAdmin,
   isReviewer,
+  getDirectAccess,
   canManageDirectly,
+  recordAutoApproval,
   resolveApprovers,
   guardDueDateUpdate,
   createApprovalRequest,

@@ -50,6 +50,9 @@ const membershipSchema = new mongoose.Schema({
     default: 'member'
   },
   position: { type: String, default: null },
+  // Permiso especial (lo activa un administrador): amplía plazos y elimina tareas
+  // sin pedir autorización. Cada acción queda registrada como autoaprobada.
+  selfApproval: { type: Boolean, default: false },
   supervisor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

@@ -31,7 +31,10 @@ const TaskApprovalRequestSchema = new mongoose.Schema({
   // Quiénes pueden aprobarla: líderes del área del solicitante (o, si el área no
   // tiene líder, su supervisor o los administradores de la organización).
   approvers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }],
-  approverSource: { type: String, enum: ['department-leader', 'supervisor', 'admin'], default: 'department-leader' },
+  approverSource: { type: String, enum: ['department-leader', 'supervisor', 'admin', 'self-approval'], default: 'department-leader' },
+  // true = la hizo alguien con permiso de autoaprobación: no se pidió permiso,
+  // la solicitud nace aprobada y solo queda como traza.
+  autoApproved: { type: Boolean, default: false },
 
   status: {
     type: String,
