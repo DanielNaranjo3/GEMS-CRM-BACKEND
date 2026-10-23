@@ -68,6 +68,20 @@ const HTTP_URL = /^https?:\/\/\S+$/i;
 // Los listados no necesitan las capturas (pesan); el detalle sí las trae.
 const LIST_EXCLUDE = '-history -attachments';
 
+// Vencida la pone el sistema (el tablero o el cron) cuando la entrega ya pasó;
+// no se elige a mano. Si la entrega se mueve al futuro, deja de estar vencida.
+function applyOverdueRule(activity, updates) {
+  const due = updates.dueDate !== undefined ? updates.dueDate : activity.dueDate;
+  const pastDue = !!due && new Date(due).getTime() < Date.now();
+  if (updates.status === 'overdue' && !pastDue) {
+    throw Object.assign(new Error('Vencida se asigna sola cuando pasa la fecha de entrega'), { status: 400 });
+  }
+  const status = updates.status ?? activity.status;
+  if (status === 'overdue' && !pastDue) {
+    updates.status = (activity.completionPercentage || 0) > 0 ? 'in-progress' : 'pending';
+  }
+}
+
 // Al completar una actividad sin fecha de fin real, se pone la de ahora.
 function fillEndDate(activity, updates) {
   const completing = updates.status === 'completed' && activity.status !== 'completed';
@@ -282,6 +296,7 @@ router.put('/:id', async (req, res) => {
       const status = updates.status ?? activity.status;
       if (!FEATURE_STATUSES.has(status)) updates.status = 'pending';
     }
+    applyOverdueRule(activity, updates);
     fillEndDate(activity, updates);
 
     await applyTrackedUpdates(activity, updates, userId, {
@@ -330,6 +345,7 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     const updates = { status };
+    applyOverdueRule(activity, updates);
     fillEndDate(activity, updates);
     await applyTrackedUpdates(activity, updates, req.user?._id || req.user?.id);
     activity.updatedAt = new Date();
