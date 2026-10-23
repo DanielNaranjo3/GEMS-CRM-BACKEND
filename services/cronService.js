@@ -145,7 +145,7 @@ function initActivityDueDateCron() {
       const dueSoon = await Activity.find({
         dueDate: { $gte: now, $lte: soonThreshold },
         status: { $in: ACTIVE_STATUSES },
-        type: { $ne: 'recurring' }, // las recurrentes no vencen
+        type: { $nin: ['recurring', 'feature'] }, // las recurrentes y las features no vencen
         dueSoonNotified: { $ne: true }
       }).populate('assignedTo', 'name email');
 
@@ -159,7 +159,7 @@ function initActivityDueDateCron() {
       const overdue = await Activity.find({
         dueDate: { $lt: now },
         status: { $in: ACTIVE_STATUSES },
-        type: { $ne: 'recurring' }, // las recurrentes no vencen
+        type: { $nin: ['recurring', 'feature'] }, // las recurrentes y las features no vencen
         overdueNotified: { $ne: true }
       }).populate('assignedTo', 'name email');
 

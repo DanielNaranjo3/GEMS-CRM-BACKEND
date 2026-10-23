@@ -1,13 +1,14 @@
 /**
- * Autorizaciones sobre actividades y tareas del tablero: ampliar la fecha de
+ * Autorizaciones sobre actividades y tareas del tablero: cambiar la fecha de
  * entrega y eliminar.
  *
- * - Acortar el plazo o ponerlo por primera vez: lo puede hacer cualquiera.
- * - Ampliar el plazo, quitarlo o eliminar la tarea: solo un administrador de la
- *   organización o el líder del área de alguno de los asignados.
- * - Cualquier otra persona genera una solicitud que debe aprobar el líder del
- *   área a la que pertenece. Si su área no tiene líder, la aprueba su supervisor
- *   y, si tampoco tiene, los administradores de la organización.
+ * - Poner la fecha de entrega por primera vez: lo puede hacer cualquiera.
+ * - Una vez puesta, la fecha de entrega (fecha pactada) queda bloqueada: solo un
+ *   administrador de la organización o el líder del área de alguno de los
+ *   asignados la cambia o la quita. Igual para eliminar la tarea.
+ * - Quien tiene autoaprobación también puede, y queda la traza.
+ * - Cualquier otra persona recibe un 403: ya no se generan solicitudes nuevas
+ *   (las pendientes de antes se siguen pudiendo aprobar o rechazar).
  *
  * El área y el rol de líder se leen del Membership de la organización y, si no
  * están ahí, del usuario (la pantalla de Equipo los guardaba solo en el usuario).
@@ -19,6 +20,7 @@ const Activity = require('../models/Activity');
 const Task = require('../models/Task');
 const Notification = require('../models/Notification');
 const TaskApprovalRequest = require('../models/TaskApprovalRequest');
+const { moveToTrash } = require('./trashService');
 
 // Diferencias menores a un minuto no cuentan: el formulario manda la fecha sin segundos.
 const TOLERANCE_MS = 60 * 1000;
@@ -156,6 +158,18 @@ async function getDirectAccess(req, entity) {
 
 async function canManageDirectly(req, entity) {
   return !!(await getDirectAccess(req, entity));
+}
+
+/**
+ * ¿Puede, en general, cambiar fechas pactadas y eliminar tareas? Para mostrar
+ * u ocultar esos controles; el detalle por tarea lo decide getDirectAccess
+ * (un líder solo puede sobre las tareas de su área).
+ */
+async function canManageTasks(req) {
+  if (isOrgAdmin(req)) return true;
+  const userId = idOf(req.user?._id);
+  const me = (await getProfiles(req.organizationId, [userId])).get(userId);
+  return !!(me && ((me.isLeader && normalizeDepartment(me.department)) || me.selfApproval));
 }
 
 /**
@@ -311,9 +325,9 @@ async function createApprovalRequest({ req, kind, entityType, entity, requestedD
 
 /**
  * Valida el cambio de fecha que trae un PUT de actividad o tarea.
- * Devuelve las actualizaciones a aplicar (sin dueDate si requiere aprobación)
- * y, en ese caso, `pendingExtension` con los datos para crear la solicitud.
- * Lanza TaskApprovalError si se intenta quitar la fecha sin permiso.
+ * Devuelve las actualizaciones a aplicar y, con autoaprobación, `autoApproval`
+ * con los datos de la traza (`pendingExtension` queda siempre en null).
+ * Lanza TaskApprovalError si se intenta cambiar una fecha pactada sin permiso.
  */
 async function guardDueDateUpdate({ req, entity, updates }) {
   const clean = { ...updates };
@@ -324,30 +338,24 @@ async function guardDueDateUpdate({ req, entity, updates }) {
   if (change === 'invalid') {
     throw new TaskApprovalError(400, 'INVALID_DUE_DATE', 'La fecha de entrega no es válida');
   }
-  if (change !== 'extend' && change !== 'remove') {
+  if (change === 'none' || change === 'set') {
     return { updates: clean, pendingExtension: null, autoApproval: null };
   }
   const access = await getDirectAccess(req, entity);
   if (access === 'admin' || access === 'leader') {
     return { updates: clean, pendingExtension: null, autoApproval: null };
   }
-  // Autoaprobación: amplía sin pedir permiso y deja la traza (quitar la fecha
-  // sigue siendo solo de líderes y administradores).
-  if (access === 'self-approval' && change === 'extend') {
+  // Autoaprobación: cambia la fecha y deja la traza (quitarla sigue siendo
+  // solo de líderes y administradores).
+  if (access === 'self-approval' && change !== 'remove') {
     return {
       updates: clean,
       pendingExtension: null,
       autoApproval: { currentDueDate: entity.dueDate || null, requestedDueDate: clean.dueDate, reason }
     };
   }
-  if (change === 'remove') {
-    throw new TaskApprovalError(403, 'DUE_DATE_REMOVAL_FORBIDDEN',
-      'Solo el líder del área o un administrador puede quitar la fecha de entrega');
-  }
-
-  const requestedDueDate = clean.dueDate;
-  delete clean.dueDate;
-  return { updates: clean, pendingExtension: { requestedDueDate, reason }, autoApproval: null };
+  throw new TaskApprovalError(403, 'DUE_DATE_LOCKED',
+    'La fecha de entrega ya está pactada: solo el líder del área o un administrador puede cambiarla');
 }
 
 /** Resumen que se adjunta a la respuesta para que el frontend avise. */
@@ -400,21 +408,16 @@ async function applyDueDate(entityType, entity, newDueDate, userId) {
 }
 
 /**
- * Elimina la actividad o tarea con los mismos efectos que el DELETE original y
- * cancela las solicitudes pendientes que quedan sin objeto.
+ * Manda la actividad o tarea a la papelera (ver trashService: una feature deja
+ * sus tareas "Sin feature") y cancela las solicitudes pendientes que quedan
+ * sin objeto.
  */
-async function deleteEntity(entityType, entityId, organizationId) {
+async function deleteEntity(entityType, entityId, organizationId, userId) {
   const Model = MODELS[entityType];
-  const entity = await Model.findOneAndDelete({ _id: entityId, organizationId });
+  const entity = await Model.findOne({ _id: entityId, organizationId });
   if (!entity) return null;
 
-  // Al borrar una feature, sus tareas no se borran: quedan "Sin feature"
-  if (entityType === 'activity' && entity.type === 'feature') {
-    await Activity.updateMany(
-      { featureId: entity._id, organizationId },
-      { $set: { featureId: null } }
-    );
-  }
+  await moveToTrash({ entityType, entity, organizationId, userId });
 
   await TaskApprovalRequest.updateMany(
     { organizationId, entityType, entityId: entity._id, status: 'pending' },
@@ -425,8 +428,8 @@ async function deleteEntity(entityType, entityId, organizationId) {
 
 /**
  * Para el DELETE de actividades y tareas: elimina si quien pide puede hacerlo;
- * si no, crea la solicitud de autorización.
- * Devuelve { deleted: true } | { deleted: false, request } | null si no existe.
+ * si no, lanza un 403 (ya no se generan solicitudes de eliminación).
+ * Devuelve { deleted: true } | null si no existe.
  */
 async function deleteOrRequest({ req, entityType, entityId, reason }) {
   const Model = MODELS[entityType];
@@ -440,12 +443,12 @@ async function deleteOrRequest({ req, entityType, entityId, reason }) {
     const trace = access === 'self-approval'
       ? await recordAutoApproval({ req, kind: 'deletion', entityType, entity, reason })
       : null;
-    await deleteEntity(entityType, entity._id, req.organizationId);
+    await deleteEntity(entityType, entity._id, req.organizationId, idOf(req.user._id));
     return { deleted: true, autoApproved: !!trace };
   }
 
-  const request = await createApprovalRequest({ req, kind: 'deletion', entityType, entity, reason });
-  return { deleted: false, request: await describeRequest(request) };
+  throw new TaskApprovalError(403, 'DELETE_FORBIDDEN',
+    'Solo el líder del área o un administrador puede eliminar tareas');
 }
 
 async function finishReview(req, request, status, comment) {
@@ -462,7 +465,7 @@ async function approveRequest(req, request, comment) {
 
   if (request.kind === 'deletion') {
     // Si ya no existe, la solicitud igual se cierra como aprobada
-    await deleteEntity(request.entityType, request.entityId, req.organizationId);
+    await deleteEntity(request.entityType, request.entityId, req.organizationId, reviewerId);
     await finishReview(req, request, 'approved', comment);
     await notify(req.organizationId, [request.requestedBy], {
       title: 'Eliminación aprobada',
@@ -507,6 +510,7 @@ module.exports = {
   isReviewer,
   getDirectAccess,
   canManageDirectly,
+  canManageTasks,
   recordAutoApproval,
   resolveApprovers,
   guardDueDateUpdate,

@@ -12,10 +12,8 @@ const { HISTORY_POPULATE, commentSnippet, applyTrackedUpdates } = require('../se
 const {
   TaskApprovalError,
   guardDueDateUpdate,
-  createApprovalRequest,
   recordAutoApproval,
-  deleteOrRequest,
-  describeRequest
+  deleteOrRequest
 } = require('../services/taskApprovalService');
 
 // Configuración de multer para imágenes de comentarios en tareas
@@ -253,10 +251,9 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Tarea no encontrada' });
     }
 
-    // Ampliar el plazo requiere aprobación del líder del área (ver dueDateExtensionService):
-    // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
-    // Con autoaprobación se aplica y queda la traza.
-    const { updates, pendingExtension, autoApproval } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
+    // La fecha de entrega pactada solo la cambia el líder del área o un
+    // administrador (ver taskApprovalService); con autoaprobación queda la traza.
+    const { updates, autoApproval } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
 
     await applyTrackedUpdates(task, updates, userId, {
       untracked: UNTRACKED_FIELDS,
@@ -265,18 +262,12 @@ router.put('/:id', async (req, res) => {
 
     await task.save();
 
-    let dueDateExtensionRequest = null;
-    if (pendingExtension) {
-      const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'task', entity: task, ...pendingExtension });
-      dueDateExtensionRequest = await describeRequest(request);
-    }
     if (autoApproval) {
       await recordAutoApproval({ req, kind: 'due-date-extension', entityType: 'task', entity: task, ...autoApproval });
     }
 
     await populateTaskDetail(task);
 
-    if (dueDateExtensionRequest) return res.json({ ...task.toJSON(), dueDateExtensionRequest });
     if (autoApproval) return res.json({ ...task.toJSON(), dueDateAutoApproved: true });
     res.json(task);
   } catch (error) {
@@ -572,9 +563,8 @@ router.post('/:id/timer/stop', async (req, res) => {
   }
 });
 
-// Eliminar tarea
-// Solo el líder del área o un administrador elimina directamente; cualquier otra
-// persona genera una solicitud de autorización (202) que aprueba su líder.
+// Eliminar tarea (va a la papelera, ver services/trashService.js)
+// Solo el líder del área, un administrador o quien tiene autoaprobación (403 para el resto).
 router.delete('/:id', async (req, res) => {
   try {
     const result = await deleteOrRequest({
@@ -586,13 +576,6 @@ router.delete('/:id', async (req, res) => {
 
     if (!result) {
       return res.status(404).json({ error: 'Tarea no encontrada' });
-    }
-    if (!result.deleted) {
-      return res.status(202).json({
-        message: 'Se envió la solicitud de autorización para eliminar la tarea',
-        pendingApproval: true,
-        approvalRequest: result.request
-      });
     }
 
     res.json({ message: 'Tarea eliminada exitosamente', autoApproved: !!result.autoApproved });

@@ -8,11 +8,10 @@ const {
   classifyDueDateChange,
   isOrgAdmin,
   isReviewer,
+  canManageTasks,
   getDirectAccess,
   recordAutoApproval,
   resolveApprovers,
-  createApprovalRequest,
-  describeRequest,
   canReview,
   loadEntity,
   applyDueDate,
@@ -73,9 +72,10 @@ router.get('/', async (req, res) => {
 // - count: pendientes que me toca aprobar
 // - mine: mis solicitudes que siguen en espera
 // - canReview: si soy líder de área o administrador (si no, no tengo bandeja de aprobación)
+// - canManageTasks: si puedo cambiar fechas pactadas y eliminar (para mostrar esos controles)
 router.get('/pending-count', async (req, res) => {
   try {
-    const [count, mine, reviewer] = await Promise.all([
+    const [count, mine, reviewer, manager] = await Promise.all([
       TaskApprovalRequest.countDocuments({
         organizationId: req.organizationId,
         status: 'pending',
@@ -86,9 +86,10 @@ router.get('/pending-count', async (req, res) => {
         status: 'pending',
         requestedBy: req.user._id
       }),
-      isReviewer(req)
+      isReviewer(req),
+      canManageTasks(req)
     ]);
-    res.json({ count, mine, canReview: reviewer || count > 0 });
+    res.json({ count, mine, canReview: reviewer || count > 0, canManageTasks: manager });
   } catch (error) {
     handleError(res, error);
   }
@@ -130,7 +131,7 @@ router.get('/entity/:entityType/:entityId', async (req, res) => {
   }
 });
 
-// Pedir ampliación de plazo. Si quien la pide puede ampliar directamente, se aplica de una vez.
+// Ampliar el plazo: se aplica si quien lo pide puede hacerlo; si no, 403.
 router.post('/due-date-extension', async (req, res) => {
   try {
     const { entityType, entityId, requestedDueDate, reason } = req.body || {};
@@ -165,10 +166,11 @@ router.post('/due-date-extension', async (req, res) => {
       });
     }
 
-    const request = await createApprovalRequest({
-      req, kind: 'due-date-extension', entityType, entity, requestedDueDate, reason
+    // La fecha pactada ya no se amplía por solicitud (ver taskApprovalService)
+    res.status(403).json({
+      error: 'La fecha de entrega ya está pactada: solo el líder del área o un administrador puede cambiarla',
+      code: 'DUE_DATE_LOCKED'
     });
-    res.status(201).json({ applied: false, request: await describeRequest(request) });
   } catch (error) {
     handleError(res, error);
   }

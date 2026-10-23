@@ -166,6 +166,7 @@ const avatarRoutes = require('./routes/avatars');
 const taskReportsRoutes = require('./routes/taskReports');
 const tasksRoutes = require('./routes/tasks');
 const taskApprovalsRoutes = require('./routes/taskApprovals');
+const trashRoutes = require('./routes/trash');
 const boardsRoutes = require('./routes/boards');
 const githubRoutes = require('./routes/github');
 const ticketsRoutes = require('./routes/tickets');
@@ -220,6 +221,7 @@ app.use('/api/task-reports', taskReportsRoutes);
 app.use('/api/taskReports', taskReportsRoutes); // Alias para compatibilidad
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/task-approvals', taskApprovalsRoutes);
+app.use('/api/trash', trashRoutes);
 app.use('/api/boards', boardsRoutes);
 app.use('/api/github', githubRoutes);
 app.use('/api/tickets', ticketsRoutes);
@@ -245,6 +247,11 @@ db.once('open', async () => {
   await ensureSupportUser();
   await ensureDefaultRoles();
   await ensureDefaultClientProjects();
+
+  // Papelera: borra definitivamente lo que pasó el plazo de retención
+  require('./services/trashService').purgeExpired()
+    .then(n => { if (n) console.log(`Papelera: ${n} elemento(s) vencido(s) eliminado(s)`); })
+    .catch(e => console.warn('Papelera: no se pudo purgar:', e.message));
 
   // Inicializar servicios de cron
   const { initTaskReportsCron, initTeamReportsCron, initSlaCron, initActivityDueDateCron } = require('./services/cronService');

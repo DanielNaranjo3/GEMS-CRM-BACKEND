@@ -31,18 +31,23 @@ const ActivitySchema = new mongoose.Schema({
   // pertenece esta tarea — arma la cascada Proyecto → Feature → Tarea del Backlog.
   featureId: { type: mongoose.Schema.Types.ObjectId, ref: 'Activity', default: null, index: true },
   acceptanceCriteria: { type: String, default: '' },
+  // Etiquetas libres (p. ej. el sprint) para filtrar el backlog y sacar estadísticas.
+  // Se guardan en minúsculas y sin espacios sobrantes (ver normalizeTags en routes/activities.js).
+  tags: { type: [String], default: [], index: true },
   environment: {
     type: String,
     enum: ['development', 'testing', 'production', null],
     default: null
   },
-  // Adjuntos: enlaces externos (Drive, SharePoint...) o capturas de pantalla
-  // guardadas en la propia base como data URL comprimida — nada en el disco
-  // del servidor, que en Render se borra en cada despliegue.
+  // Adjuntos: enlaces externos (Drive, SharePoint...), capturas de pantalla
+  // guardadas en la propia base como data URL comprimida, o documentos (PDF,
+  // Word, Excel) en GridFS (fileId) — nada en el disco del servidor, que en
+  // Render se borra en cada despliegue.
   attachments: [{
     kind: { type: String, enum: ['link', 'image', 'file'], default: 'link' },
     name: String,
     url: String,
+    fileId: { type: mongoose.Schema.Types.ObjectId, default: null },
     mimetype: String,
     size: Number,
     uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -54,7 +59,11 @@ const ActivitySchema = new mongoose.Schema({
     enum: ['low', 'medium', 'high', 'urgent'], 
     default: 'medium' 
   },
+  // Fecha de entrega pactada: una vez puesta solo la cambia el líder del área
+  // o un administrador (ver services/taskApprovalService.js).
   dueDate: { type: Date },
+  // Fecha real en que se terminó; se pone sola al completar y se puede ajustar.
+  endDate: { type: Date, default: null },
   // Evitan reenviar el mismo recordatorio de vencimiento en cada corrida del cron.
   // Se resetean a false cuando dueDate cambia (ver PUT /:id).
   dueSoonNotified: { type: Boolean, default: false },

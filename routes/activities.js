@@ -11,11 +11,10 @@ const { HISTORY_POPULATE, commentSnippet, applyTrackedUpdates } = require('../se
 const {
   TaskApprovalError,
   guardDueDateUpdate,
-  createApprovalRequest,
   recordAutoApproval,
-  deleteOrRequest,
-  describeRequest
+  deleteOrRequest
 } = require('../services/taskApprovalService');
+const activityFiles = require('../services/activityFileStore');
 
 // Campos que no se registran como cambio en el historial: internos o con registro propio.
 const UNTRACKED_FIELDS = new Set([
@@ -29,12 +28,28 @@ const VALUELESS_FIELDS = new Set(['description', 'acceptanceCriteria']);
 // Los selects del formulario mandan '' cuando no hay valor; para un ObjectId o
 // un enum eso es un error de validación, así que se normaliza a null. Una
 // feature no puede colgar de otra feature (la cascada es Feature → Tarea).
+// Las features son bloques amplios de tiempo: solo Nueva (pending) o Terminada (completed).
+const FEATURE_STATUSES = new Set(['pending', 'completed']);
+
+// Etiquetas en minúsculas, sin repetir y con un tope razonable.
+function normalizeTags(tags) {
+  const list = Array.isArray(tags) ? tags : String(tags || '').split(',');
+  const clean = list
+    .map(t => String(t || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 40))
+    .filter(Boolean);
+  return [...new Set(clean)].slice(0, 20);
+}
+
 function normalizeActivityBody(body) {
   const clean = { ...body };
-  for (const field of ['featureId', 'environment', 'projectId']) {
+  for (const field of ['featureId', 'environment', 'projectId', 'endDate']) {
     if (clean[field] === '') clean[field] = null;
   }
-  if (clean.type === 'feature') clean.featureId = null;
+  if (clean.tags !== undefined) clean.tags = normalizeTags(clean.tags);
+  if (clean.type === 'feature') {
+    clean.featureId = null;
+    if (clean.status !== undefined && !FEATURE_STATUSES.has(clean.status)) clean.status = 'pending';
+  }
   // Una recurrente no vence: sin fecha de entrega (el cron de vencimientos la ignora)
   if (clean.type === 'recurring') clean.dueDate = null;
   // El registro diario y los adjuntos tienen sus propias rutas
@@ -52,6 +67,13 @@ const HTTP_URL = /^https?:\/\/\S+$/i;
 
 // Los listados no necesitan las capturas (pesan); el detalle sí las trae.
 const LIST_EXCLUDE = '-history -attachments';
+
+// Al completar una actividad sin fecha de fin real, se pone la de ahora.
+function fillEndDate(activity, updates) {
+  const completing = updates.status === 'completed' && activity.status !== 'completed';
+  const endDate = updates.endDate !== undefined ? updates.endDate : activity.endDate;
+  if (completing && !endDate) updates.endDate = new Date();
+}
 
 // Fecha "de hoy" para el registro diario, en hora de Costa Rica (el servidor corre en UTC)
 function todayKey() {
@@ -156,7 +178,7 @@ router.get('/mine', async (req, res) => {
 // Obtener todas las actividades
 router.get('/', async (req, res) => {
   try {
-    const { assignedTo, status, projectId, type } = req.query;
+    const { assignedTo, status, projectId, type, tag } = req.query;
 
     // Construir filtros
     let filter = {};
@@ -172,6 +194,9 @@ router.get('/', async (req, res) => {
     if (type) {
       filter.type = type;
     }
+    if (tag) {
+      filter.tags = String(tag).trim().toLowerCase();
+    }
 
     const activities = await Activity.find(filter)
       .select(LIST_EXCLUDE)
@@ -182,6 +207,16 @@ router.get('/', async (req, res) => {
       .sort({ createdAt: -1 });
 
     res.json(activities);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Etiquetas usadas en la organización, para sugerirlas y filtrar
+router.get('/tags', async (req, res) => {
+  try {
+    const tags = await Activity.distinct('tags', { organizationId: req.organizationId });
+    res.json(tags.filter(Boolean).sort((a, b) => a.localeCompare(b, 'es')));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -233,16 +268,21 @@ router.put('/:id', async (req, res) => {
 
     const previousDueDate = activity.dueDate ? activity.dueDate.getTime() : null;
 
-    // Ampliar el plazo requiere aprobación del líder del área (ver taskApprovalService):
-    // si quien edita no puede, se guarda el resto y la nueva fecha queda como solicitud.
-    // Con autoaprobación se aplica y queda la traza.
-    const { updates, pendingExtension, autoApproval } = await guardDueDateUpdate({
+    // La fecha de entrega pactada solo la cambia el líder del área o un
+    // administrador (ver taskApprovalService); con autoaprobación queda la traza.
+    const { updates, autoApproval } = await guardDueDateUpdate({
       req,
       entity: activity,
       updates: normalizeActivityBody(req.body)
     });
     // Un cambio de tipo a feature también suelta la feature padre que tuviera
-    if ((updates.type ?? activity.type) === 'feature') updates.featureId = null;
+    // y la deja en uno de sus dos estados
+    if ((updates.type ?? activity.type) === 'feature') {
+      updates.featureId = null;
+      const status = updates.status ?? activity.status;
+      if (!FEATURE_STATUSES.has(status)) updates.status = 'pending';
+    }
+    fillEndDate(activity, updates);
 
     await applyTrackedUpdates(activity, updates, userId, {
       untracked: UNTRACKED_FIELDS,
@@ -260,18 +300,12 @@ router.put('/:id', async (req, res) => {
     // Como el findByIdAndUpdate anterior: no revalidar campos que no se tocaron
     await activity.save({ validateModifiedOnly: true });
 
-    let dueDateExtensionRequest = null;
-    if (pendingExtension) {
-      const request = await createApprovalRequest({ req, kind: 'due-date-extension', entityType: 'activity', entity: activity, ...pendingExtension });
-      dueDateExtensionRequest = await describeRequest(request);
-    }
     if (autoApproval) {
       await recordAutoApproval({ req, kind: 'due-date-extension', entityType: 'activity', entity: activity, ...autoApproval });
     }
 
     const populated = await populateActivityDetail(Activity.findById(activity._id));
 
-    if (dueDateExtensionRequest) return res.json({ ...populated.toJSON(), dueDateExtensionRequest });
     if (autoApproval) return res.json({ ...populated.toJSON(), dueDateAutoApproved: true });
     res.json(populated);
   } catch (error) {
@@ -291,8 +325,13 @@ router.patch('/:id/status', async (req, res) => {
     if (!activity) {
       return res.status(404).json({ error: 'Actividad no encontrada' });
     }
+    if (activity.type === 'feature' && !FEATURE_STATUSES.has(status)) {
+      return res.status(400).json({ error: 'Una feature solo puede estar Nueva o Terminada' });
+    }
 
-    await applyTrackedUpdates(activity, { status }, req.user?._id || req.user?.id);
+    const updates = { status };
+    fillEndDate(activity, updates);
+    await applyTrackedUpdates(activity, updates, req.user?._id || req.user?.id);
     activity.updatedAt = new Date();
 
     // Si se marca como completada, detener todas las sesiones activas
@@ -424,9 +463,8 @@ router.post('/:id/timer', async (req, res) => {
   }
 });
 
-// Eliminar actividad
-// Solo el líder del área o un administrador elimina directamente; cualquier otra
-// persona genera una solicitud de autorización (202) que aprueba su líder.
+// Eliminar actividad (va a la papelera, ver services/trashService.js)
+// Solo el líder del área, un administrador o quien tiene autoaprobación (403 para el resto).
 router.delete('/:id', async (req, res) => {
   try {
     const result = await deleteOrRequest({
@@ -437,9 +475,6 @@ router.delete('/:id', async (req, res) => {
     });
     if (!result) {
       return res.status(404).json({ error: 'Actividad no encontrada' });
-    }
-    if (!result.deleted) {
-      return res.status(202).json({ success: false, pendingApproval: true, approvalRequest: result.request });
     }
     res.json({ success: true, autoApproved: !!result.autoApproved });
   } catch (error) {
@@ -494,6 +529,86 @@ router.post('/:id/attachments', authenticateToken, async (req, res) => {
   }
 });
 
+// Documentos (PDF, Word, Excel) en GridFS — multipart con el campo "file"
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: activityFiles.MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    if (!activityFiles.isAllowedDocument(file)) {
+      return cb(new Error('Solo se permiten archivos PDF, Word o Excel'), false);
+    }
+    cb(null, true);
+  }
+});
+
+function handleDocumentUpload(req, res, next) {
+  documentUpload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'El archivo pesa más de 5 MB' });
+    }
+    return res.status(400).json({ error: err.message });
+  });
+}
+
+router.post('/:id/attachments/file', authenticateToken, handleDocumentUpload, async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo' });
+
+    const activity = await Activity.findOne({ _id: req.params.id, organizationId: req.organizationId });
+    if (!activity) return res.status(404).json({ error: 'Actividad no encontrada' });
+
+    // multer entrega el nombre en latin1; los acentos se recuperan así
+    const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    const name = ((req.body?.name || '').toString().trim() || originalName).slice(0, 200);
+    const fileId = await activityFiles.saveFile({
+      buffer: req.file.buffer,
+      filename: originalName,
+      mimetype: req.file.mimetype,
+      metadata: { activityId: activity._id, organizationId: req.organizationId, uploadedBy: userId }
+    });
+
+    activity.attachments.push({
+      kind: 'file',
+      name,
+      fileId,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      uploadedBy: userId,
+      uploadedAt: new Date()
+    });
+    activity.logAction('attachment_added', userId, { newValue: name });
+    await activity.save({ validateModifiedOnly: true });
+
+    res.json(await populateActivityDetail(Activity.findById(activity._id)));
+  } catch (error) {
+    console.error('Error subiendo documento a actividad:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Descarga del documento (el frontend lo pide con el token y lo abre como blob)
+router.get('/:id/attachments/:attachmentId/file', async (req, res) => {
+  try {
+    const activity = await Activity.findOne({ _id: req.params.id, organizationId: req.organizationId })
+      .select('attachments');
+    const attachment = activity?.attachments.id(req.params.attachmentId);
+    if (!attachment || !attachment.fileId) return res.status(404).json({ error: 'Adjunto no encontrado' });
+
+    res.set('Content-Type', attachment.mimetype || 'application/octet-stream');
+    res.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(attachment.name || 'archivo')}`);
+    activityFiles.openDownload(attachment.fileId)
+      .on('error', () => {
+        if (!res.headersSent) res.status(404).json({ error: 'El archivo ya no existe' });
+        else res.end();
+      })
+      .pipe(res);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== TAREAS RECURRENTES ====================
 
 // "+" del día: registra que la persona hizo hoy la tarea recurrente. Pulsarlo
@@ -534,8 +649,10 @@ router.delete('/:id/attachments/:attachmentId', authenticateToken, async (req, r
     if (!attachment) return res.status(404).json({ error: 'Adjunto no encontrado' });
 
     activity.logAction('attachment_deleted', userId, { oldValue: attachment.name });
+    const fileId = attachment.fileId;
     activity.attachments.pull(req.params.attachmentId);
     await activity.save({ validateModifiedOnly: true });
+    if (fileId) await activityFiles.deleteFiles([fileId]);
 
     res.json(await populateActivityDetail(Activity.findById(activity._id)));
   } catch (error) {
