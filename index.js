@@ -174,6 +174,7 @@ const rolesRoutes = require('./routes/roles');
 const wikiRoutes = require('./routes/wiki');
 const aiRoutes = require('./routes/ai');
 const adminRoutes = require('./routes/admin');
+const dashboardRoutes = require('./routes/dashboard');
 
 // Usar rutas — rate limits específicos por sub-ruta antes del authLimiter genérico.
 // Orden importa: los limiters específicos se montan ANTES del general para que matcheen primero.
@@ -229,6 +230,7 @@ app.use('/api/roles', rolesRoutes);
 app.use('/api/wiki', wikiRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 
 // Conexión a MongoDB usando .env
