@@ -17,6 +17,23 @@ const {
 } = require('../services/taskApprovalService');
 
 // Configuración de multer para imágenes de comentarios en tareas
+// El modal compartido manda estados de Actividad (pending/in-progress/completed...),
+// pero en Task la columna del tablero es boardStatus y status tiene otro enum.
+// Sin traducirlos, "Completada" fallaba al validar o la tarea quedaba en su
+// columna original en vez de "Done".
+const ACTIVITY_TO_BOARD_STATUS = { completed: 'done', cancelled: 'done', 'in-progress': 'in-progress' };
+const TASK_STATUSES = new Set(['new', 'active', 'resolved', 'closed', 'removed']);
+function normalizeTaskStatus(body) {
+  const clean = { ...body };
+  const mapped = ACTIVITY_TO_BOARD_STATUS[clean.status];
+  if (mapped) {
+    clean.boardStatus = mapped;
+    if (mapped === 'done') clean.completionPercentage = 100;
+  }
+  if (clean.status !== undefined && !TASK_STATUSES.has(clean.status)) delete clean.status;
+  return clean;
+}
+
 const taskCommentsUploadDir = path.join(__dirname, '..', 'uploads', 'task-comments');
 if (!fs.existsSync(taskCommentsUploadDir)) {
   fs.mkdirSync(taskCommentsUploadDir, { recursive: true });
@@ -214,7 +231,7 @@ router.post('/', async (req, res) => {
     const userId = req.user.id || req.user._id;
 
     const taskData = {
-      ...req.body,
+      ...normalizeTaskStatus(req.body),
       createdBy: userId
     };
 
@@ -253,7 +270,7 @@ router.put('/:id', async (req, res) => {
 
     // La fecha de entrega pactada solo la cambia el líder del área o un
     // administrador (ver taskApprovalService); con autoaprobación queda la traza.
-    const { updates, autoApproval } = await guardDueDateUpdate({ req, entity: task, updates: req.body });
+    const { updates, autoApproval } = await guardDueDateUpdate({ req, entity: task, updates: normalizeTaskStatus(req.body) });
 
     await applyTrackedUpdates(task, updates, userId, {
       untracked: UNTRACKED_FIELDS,

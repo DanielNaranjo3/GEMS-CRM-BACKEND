@@ -136,6 +136,11 @@ router.post('/', authenticateToken, async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
     const activity = new Activity(normalizeActivityBody(req.body));
+    // Creada ya como completada: 100% y fecha de fin real, igual que al completarla después
+    if (activity.status === 'completed') {
+      activity.completionPercentage = 100;
+      if (!activity.endDate) activity.endDate = new Date();
+    }
     // El autor es quien hace la petición, no lo que mande el cliente
     if (userId) activity.createdBy = userId;
     // El historial solo lo escribe el servidor
