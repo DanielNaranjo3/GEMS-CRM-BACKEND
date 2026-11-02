@@ -58,7 +58,7 @@ const upload = multer({
 // GET - Obtener todos los casos con filtros
 router.get('/', async (req, res) => {
   try {
-    const { tipo, estado, prioridad, cliente_id, asignado_a, categoria, page = 1, limit = 10 } = req.query;
+    const { tipo, estado, prioridad, cliente_id, proyecto_id, asignado_a, categoria, page = 1, limit = 10 } = req.query;
     
     // Construir filtros (organizationId explícito como defensa en profundidad — plugin lo refuerza)
     let filters = { organizationId: req.organizationId };
@@ -66,6 +66,7 @@ router.get('/', async (req, res) => {
     if (estado) filters.estado = estado;
     if (prioridad) filters.prioridad = prioridad;
     if (cliente_id) filters.cliente_id = cliente_id;
+    if (proyecto_id) filters.proyecto_id = proyecto_id;
     if (asignado_a) filters.asignado_a = asignado_a;
     if (categoria) filters.categoria = categoria;
     
@@ -73,7 +74,7 @@ router.get('/', async (req, res) => {
     const skip = (page - 1) * limit;
     
     const cases = await Case.find(filters)
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role')
       .populate('comentarios.autor', 'name email')
       .populate('dailyLogs.autor', 'name email avatar')
@@ -102,7 +103,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const case_item = await Case.findOne({ _id: req.params.id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email telefono')
+      .populate('cliente_id', 'name company email phone projects')
       .populate('asignado_a', 'name email role avatar')
       .populate('comentarios.autor', 'name email avatar')
       .populate('dailyLogs.autor', 'name email avatar')
@@ -138,6 +139,7 @@ router.post('/', upload.array('archivos', 10), async (req, res) => {
       prioridad: req.body.prioridad || 'media',
       progreso: req.body.progreso ? parseInt(req.body.progreso) : 0,
       cliente_id: req.body.cliente_id || null,
+      proyecto_id: req.body.proyecto_id || null,
       categoria: req.body.categoria || '',
       archivos: []
     };
@@ -157,7 +159,7 @@ router.post('/', upload.array('archivos', 10), async (req, res) => {
     const savedCase = await newCase.save();
     
     const populatedCase = await Case.findOne({ _id: savedCase._id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role');
     
     res.status(201).json(populatedCase);
@@ -254,7 +256,9 @@ router.put('/:id', upload.array('archivos', 10), async (req, res) => {
       progreso: req.body.progreso !== undefined ? parseInt(req.body.progreso) : case_item.progreso,
       metodologia: req.body.metodologia || case_item.metodologia,
       wikiContent: req.body.wikiContent || case_item.wikiContent,
-      cliente_id: req.body.cliente_id || case_item.cliente_id,
+      // '' (select vacío / multipart) limpia el vínculo; undefined lo conserva
+      cliente_id: req.body.cliente_id !== undefined ? (req.body.cliente_id || null) : case_item.cliente_id,
+      proyecto_id: req.body.proyecto_id !== undefined ? (req.body.proyecto_id || null) : case_item.proyecto_id,
       asignado_a: req.body.asignado_a || case_item.asignado_a,
       categoria: req.body.categoria || case_item.categoria,
       gravedad: req.body.gravedad || case_item.gravedad,
@@ -285,7 +289,7 @@ router.put('/:id', upload.array('archivos', 10), async (req, res) => {
       updateData,
       { new: true, runValidators: true }
     )
-    .populate('cliente_id', 'nombre empresa email')
+    .populate('cliente_id', 'name company email projects')
     .populate('asignado_a', 'name email role');
     
     res.json(updatedCase);
@@ -319,7 +323,7 @@ router.post('/:id/comments', async (req, res) => {
     await case_item.save();
     
     const updatedCase = await Case.findOne({ _id: req.params.id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role avatar')
       .populate('comentarios.autor', 'name email avatar')
       .populate('dailyLogs.autor', 'name email avatar');
@@ -499,7 +503,7 @@ router.post('/:id/daily-logs', async (req, res) => {
     await case_item.save();
     
     const updatedCase = await Case.findOne({ _id: req.params.id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role avatar')
       .populate('comentarios.autor', 'name email avatar')
       .populate('dailyLogs.autor', 'name email avatar');
@@ -525,7 +529,7 @@ router.post('/:id/tickets', async (req, res) => {
     }
     
     const populated = await Case.findOne({ _id: case_item._id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role avatar')
       .populate('comentarios.autor', 'name email avatar')
       .populate('dailyLogs.autor', 'name email avatar')
@@ -547,7 +551,7 @@ router.delete('/:id/tickets/:ticketId', async (req, res) => {
     await case_item.save();
     
     const populated = await Case.findOne({ _id: case_item._id, organizationId: req.organizationId })
-      .populate('cliente_id', 'nombre empresa email')
+      .populate('cliente_id', 'name company email projects')
       .populate('asignado_a', 'name email role avatar')
       .populate('comentarios.autor', 'name email avatar')
       .populate('dailyLogs.autor', 'name email avatar')

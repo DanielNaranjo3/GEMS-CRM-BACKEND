@@ -36,6 +36,11 @@ const CaseSchema = new mongoose.Schema({
     ref: 'Client',
     required: false 
   },
+  // Subdocumento de Client.projects — se resuelve junto con cliente_id
+  proyecto_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: false
+  },
   asignado_a: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'Team',
@@ -175,7 +180,7 @@ CaseSchema.pre('save', function() {
 
 // Índices para búsqueda optimizada
 CaseSchema.index({ tipo: 1, estado: 1 });
-CaseSchema.index({ cliente_id: 1 });
+CaseSchema.index({ cliente_id: 1, proyecto_id: 1 });
 CaseSchema.index({ asignado_a: 1 });
 CaseSchema.index({ 'tags': 1 });
 

@@ -129,7 +129,9 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
 
 // Healthcheck público (sin rate limit estricto)
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, mongo: mongoose.connection.readyState === 1 });
+  // email: si el backend tiene credenciales para enviar correos (sin exponerlas)
+  const email = process.env.RESEND_API_KEY ? 'resend' : (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) ? 'smtp' : 'none';
+  res.json({ ok: true, mongo: mongoose.connection.readyState === 1, email });
 });
 
 // Create uploads/chat directory if it doesn't exist

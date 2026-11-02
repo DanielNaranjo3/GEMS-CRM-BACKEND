@@ -20,14 +20,21 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
+// multipart manda '' cuando el select queda vacío → null (ObjectId no castea '')
+const normalizeLinkIds = (data) => {
+  for (const k of ['cliente_id', 'proyecto_id']) if (k in data && !data[k]) data[k] = null;
+};
+
 // Obtener todos los artículos de la wiki
 router.get('/', async (req, res) => {
   try {
-    const { categoria, search } = req.query;
+    const { categoria, search, cliente_id, proyecto_id } = req.query;
     // Bug de multi-tenancy: antes esta ruta no filtraba por organización y
     // devolvía artículos de wiki de TODAS las organizaciones.
     let query = { organizationId: req.organizationId };
     if (categoria) query.categoria = categoria;
+    if (cliente_id) query.cliente_id = cliente_id;
+    if (proyecto_id) query.proyecto_id = proyecto_id;
     if (search) {
       query.$or = [
         { titulo: { $regex: search, $options: 'i' } },
@@ -37,6 +44,7 @@ router.get('/', async (req, res) => {
     }
     const articles = await Wiki.find(query)
       .populate('autor', 'name email')
+      .populate('cliente_id', 'name company projects')
       .populate('linkedTickets', 'subject ticketNumber status')
       .sort({ updatedAt: -1 });
     res.json(articles);
@@ -50,6 +58,7 @@ router.get('/:id', async (req, res) => {
   try {
     const article = await Wiki.findOne({ _id: req.params.id, organizationId: req.organizationId })
       .populate('autor', 'name email')
+      .populate('cliente_id', 'name company projects')
       .populate('linkedTickets');
     if (!article) return res.status(404).json({ message: 'Artículo no encontrado' });
     article.vistas += 1;
@@ -68,6 +77,7 @@ router.post('/', upload.array('archivos', 5), async (req, res) => {
       organizationId: req.organizationId,
       autor: req.userId || req.body.autor
     };
+    normalizeLinkIds(wikiData);
     console.log('[DEBUG WIKI POST] req.organizationId:', req.organizationId);
     console.log('[DEBUG WIKI POST] wikiData.organizationId:', wikiData.organizationId);
     if (req.files) {
@@ -93,6 +103,7 @@ router.put('/:id', upload.array('archivos', 5), async (req, res) => {
       ...req.body,
       organizationId: req.organizationId 
     };
+    normalizeLinkIds(updateData);
     const article = await Wiki.findOne({ _id: req.params.id, organizationId: req.organizationId });
     if (!article) return res.status(404).json({ message: 'Artículo no encontrado' });
 

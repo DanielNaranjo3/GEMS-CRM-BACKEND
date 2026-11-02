@@ -422,11 +422,20 @@ router.put('/:id', checkTeamPermissions('edit'), async (req, res) => {
   }
 });
 
-// Cambiar contraseña de un usuario (solo admin)
-router.patch('/:id/password', requireRole('admin'), async (req, res) => {
+// Cambiar contraseña de un colaborador (admin y soporte). Soporte no puede
+// cambiársela a un administrador: evitaría que se escale de privilegios.
+router.patch('/:id/password', requireRole('admin', 'support'), async (req, res) => {
   try {
     const { id } = req.params;
     const { password } = req.body;
+
+    const target = await Membership.findOne({ user: id, organization: req.organizationId });
+    if (!target) {
+      return res.status(404).json({ success: false, message: 'El colaborador no pertenece a esta organización' });
+    }
+    if (!isTeamAdmin(req) && (target.isOwner || target.role === 'admin')) {
+      return res.status(403).json({ success: false, message: 'Solo un administrador puede cambiar la contraseña de otro administrador' });
+    }
 
     if (!password || password.length < 6) {
       return res.status(400).json({

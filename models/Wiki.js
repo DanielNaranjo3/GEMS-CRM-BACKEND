@@ -21,6 +21,16 @@ const wikiSchema = new mongoose.Schema({
     trim: true
   },
   tags: [String],
+  // Vínculo opcional a cliente / proyecto (subdocumento de Client.projects)
+  cliente_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Client',
+    required: false
+  },
+  proyecto_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: false
+  },
   autor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
