@@ -18,7 +18,8 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage: storage });
+// El contenido del editor trae imágenes en base64 y supera el 1 MB por campo que multer trae por defecto
+const upload = multer({ storage: storage, limits: { fieldSize: 10 * 1024 * 1024 } });
 
 // multipart manda '' cuando el select queda vacío → null (ObjectId no castea '')
 const normalizeLinkIds = (data) => {
