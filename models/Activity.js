@@ -21,6 +21,8 @@ const ActivitySchema = new mongoose.Schema({
     enum: ['task', 'bug', 'feature', 'user-story', 'recurring'],
     default: 'task'
   },
+  // Periodicidad de la recurrente (solo informativa: el registro con "+" sigue siendo diario)
+  recurrence: { type: String, enum: ['daily', 'weekly', 'monthly', 'yearly'], default: 'daily' },
   // Registro de la tarea recurrente: una entrada por persona y por día (fecha de Costa Rica)
   dailyLog: [{
     date: String, // 'YYYY-MM-DD'
