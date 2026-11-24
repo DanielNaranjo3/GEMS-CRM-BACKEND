@@ -17,6 +17,7 @@
  * Las features y las recurrentes no vencen: no entran en las cubetas.
  */
 const mongoose = require('mongoose');
+const { periodKey } = require('./recurrence');
 const Activity = require('../models/Activity');
 const Client = require('../models/Client');
 const Membership = require('../models/Membership');
@@ -175,18 +176,18 @@ async function myActivityLists(orgId, userId, now, bounds, weekEnd) {
   return lists;
 }
 
-/** Rutinas diarias (recurrentes) asignadas: cuántas ya marcó hoy. */
+/** Recurrentes asignadas: cuántas ya marcó en el período actual (hoy, esta semana, este mes o este año). */
 async function myRoutines(orgId, userId, key) {
   const docs = await Activity.find({
     organizationId: orgId,
     assignedTo: userId,
     type: 'recurring',
     status: { $in: ACTIVE }
-  }).select('title dailyLog').lean();
+  }).select('title dailyLog recurrence').lean();
   const items = docs.map(d => ({
     _id: d._id,
     title: d.title,
-    doneToday: (d.dailyLog || []).some(l => l.date === key && String(l.userId) === String(userId))
+    doneToday: (d.dailyLog || []).some(l => periodKey(l.date, d.recurrence) === periodKey(key, d.recurrence) && String(l.userId) === String(userId))
   }));
   return { total: items.length, doneToday: items.filter(i => i.doneToday).length, items: items.slice(0, 8) };
 }

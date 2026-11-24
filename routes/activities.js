@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const Activity = require('../models/Activity');
+const { periodKey } = require('../services/recurrence');
 const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
 const { notifyMentions, notifyAssignment, notifyComment } = require('../services/notificationHelpers');
@@ -632,8 +633,9 @@ router.get('/:id/attachments/:attachmentId/file', async (req, res) => {
 
 // ==================== TAREAS RECURRENTES ====================
 
-// "+" del día: registra que la persona hizo hoy la tarea recurrente. Pulsarlo
-// de nuevo el mismo día lo deshace (por si fue un clic por error).
+// "+" del período: registra que la persona hizo la recurrente hoy (día, semana,
+// mes o año según su periodicidad). Pulsarlo de nuevo en el mismo período lo
+// deshace (por si fue un clic por error).
 router.post('/:id/daily-check', authenticateToken, async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
@@ -644,10 +646,11 @@ router.post('/:id/daily-check', authenticateToken, async (req, res) => {
     }
 
     const today = todayKey();
-    const existing = activity.dailyLog.find(e => e.date === today && String(e.userId) === String(userId));
+    const period = periodKey(today, activity.recurrence);
+    const existing = activity.dailyLog.find(e => periodKey(e.date, activity.recurrence) === period && String(e.userId) === String(userId));
     if (existing) {
       activity.dailyLog.pull(existing._id);
-      activity.logAction('daily_unchecked', userId, { newValue: today });
+      activity.logAction('daily_unchecked', userId, { newValue: existing.date });
     } else {
       activity.dailyLog.push({ date: today, userId, at: new Date() });
       activity.logAction('daily_checked', userId, { newValue: today });
